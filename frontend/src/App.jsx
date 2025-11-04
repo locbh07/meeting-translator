@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { Mic, Download, Settings, Play, Square, Info } from 'lucide-react';
+import { Mic, Download, Settings, Play, Square, Info, Volume2 } from 'lucide-react';
+import speechRecognitionService from './services/speechRecognitionService';
 import websocketService from './services/websocketService';
-import audioService from './services/audioService';
 import './App.css';
 
 function App() {
@@ -12,17 +12,27 @@ function App() {
   const [language2, setLanguage2] = useState('ja');
   const [currentSpeaker, setCurrentSpeaker] = useState('1');
   
-  const [partialCaption, setPartialCaption] = useState(null);
+  // Streaming states
+  const [typingText, setTypingText] = useState(null);
   const [conversations, setConversations] = useState([]);
+  const [translatingId, setTranslatingId] = useState(null);
+  
   const [sessionDuration, setSessionDuration] = useState(0);
   
   const conversationRef = useRef(null);
   const sessionStartTime = useRef(null);
 
+  // Check Web Speech API support
+  useEffect(() => {
+    if (!speechRecognitionService.isSupported()) {
+      alert('⚠️ Trình duyệt không hỗ trợ Web Speech API!\nVui lòng sử dụng Chrome hoặc Edge.');
+    }
+  }, []);
+
   useEffect(() => {
     websocketService.connect(
-      handlePartialCaption,
-      handleFinalTranslation,
+      null, // No partial caption needed with Web Speech
+      handleTranslationResult,
       () => {
         console.log('✅ Connected to server');
         setIsConnected(true);
@@ -59,47 +69,149 @@ function App() {
     if (conversationRef.current) {
       conversationRef.current.scrollTop = conversationRef.current.scrollHeight;
     }
-  }, [conversations, partialCaption]);
+  }, [conversations, typingText]);
 
-  const handlePartialCaption = (data) => {
-    console.log('📝 Partial:', data.text);
-    setPartialCaption(data);
+  const handleInterimResult = (result) => {
+    const currentLang = currentSpeaker === '1' ? language1 : language2;
+    console.log('📝 Typing:', result.text);
+    
+    setTypingText({
+      text: result.text,
+      language: currentLang,
+      timestamp: result.timestamp
+    });
   };
 
-  const handleFinalTranslation = (data) => {
-    console.log('✅ Final:', data.originalText, '→', data.translatedText);
-    setConversations(prev => [...prev, data]);
-    setPartialCaption(null);
+  const handleFinalResult = async (result) => {
+    const currentLang = currentSpeaker === '1' ? language1 : language2;
+    const targetLang = currentSpeaker === '1' ? language2 : language1;
+    
+    console.log('✅ Final speech:', result.text);
+    
+    // Clear typing
+    setTypingText(null);
+    
+    // Add to conversation with "translating" status
+    const newConv = {
+      id: `conv-${Date.now()}`,
+      originalText: result.text,
+      originalLang: currentLang,
+      translatedText: null, // Will be filled later
+      translatedLang: targetLang,
+      timestamp: result.timestamp,
+      isTranslating: true
+    };
+    
+    setConversations(prev => [...prev, newConv]);
+    setTranslatingId(newConv.id);
+    
+    // Send to backend for translation only
+    try {
+      const translation = await requestTranslation(result.text, currentLang, targetLang);
+      
+      // Update conversation with translation
+      setConversations(prev => prev.map(conv => 
+        conv.id === newConv.id 
+          ? { ...conv, translatedText: translation, isTranslating: false }
+          : conv
+      ));
+      setTranslatingId(null);
+      
+      console.log('✅ Translation:', translation);
+    } catch (error) {
+      console.error('❌ Translation error:', error);
+      setTranslatingId(null);
+    }
   };
 
-  const startSession = async () => {
+  const handleTranslationResult = (data) => {
+    // Handle WebSocket translation response if needed
+    console.log('WebSocket translation:', data);
+  };
+
+  const requestTranslation = async (text, sourceLang, targetLang) => {
+    try {
+      const response = await fetch('http://localhost:8080/api/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: text,
+          sourceLang: sourceLang,
+          targetLang: targetLang,
+          sessionId: websocketService.getSessionId()
+        })
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        return data.translation;
+      } else {
+        throw new Error('Translation failed');
+      }
+    } catch (error) {
+      console.error('Translation request error:', error);
+      return `[Error: ${text}]`;
+    }
+  };
+
+  const startSession = () => {
     if (!isConnected) {
       alert('Chưa kết nối tới server!');
       return;
     }
 
-    websocketService.sendSessionInit(language1, language2);
-    console.log('📤 Session init:', language1, '↔', language2);
+    if (!speechRecognitionService.isSupported()) {
+      alert('Trình duyệt không hỗ trợ Web Speech API!');
+      return;
+    }
 
-    const success = await audioService.startContinuousRecording((audioData) => {
-      const langToSend = currentSpeaker === '1' ? language1 : language2;
-      websocketService.sendAudio(audioData, langToSend);
-    });
+    websocketService.sendSessionInit(language1, language2);
+    
+    const startLang = currentSpeaker === '1' ? language1 : language2;
+    const success = speechRecognitionService.start(
+      startLang,
+      handleInterimResult,
+      handleFinalResult,
+      (error) => {
+        console.error('Speech recognition error:', error);
+        alert('Lỗi nhận dạng giọng nói: ' + error.message);
+      }
+    );
 
     if (success) {
       setIsSessionActive(true);
-      console.log('🎬 Session started');
+      console.log('🎬 Session started with Web Speech API');
     } else {
-      alert('Không thể bắt đầu phiên! Kiểm tra microphone.');
+      alert('Không thể bắt đầu nhận dạng giọng nói!');
     }
   };
 
   const stopSession = () => {
-    audioService.stopRecording();
+    speechRecognitionService.stop();
     setIsSessionActive(false);
+    setTypingText(null);
     sessionStartTime.current = null;
     setSessionDuration(0);
     console.log('⏹️ Session stopped');
+  };
+
+  const switchSpeaker = () => {
+    const newSpeaker = currentSpeaker === '1' ? '2' : '1';
+    const newLang = newSpeaker === '1' ? language1 : language2;
+    
+    console.log('🔄 Switching speaker:', {
+      from: currentSpeaker,
+      to: newSpeaker,
+      fromLang: currentSpeaker === '1' ? language1 : language2,
+      toLang: newLang
+    });
+    
+    setCurrentSpeaker(newSpeaker);
+    
+    if (isSessionActive) {
+      speechRecognitionService.changeLanguage(newLang);
+      console.log('✅ Language changed to:', newLang);
+    }
   };
 
   const exportTranscript = () => {
@@ -107,7 +219,7 @@ function App() {
       sessionId: websocketService.getSessionId(),
       startTime: sessionStartTime.current,
       languages: { lang1: language1, lang2: language2 },
-      conversations: conversations
+      conversations: conversations.filter(c => !c.isTranslating)
     };
 
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -121,12 +233,8 @@ function App() {
   const clearConversation = () => {
     if (window.confirm('Xóa toàn bộ cuộc hội thoại?')) {
       setConversations([]);
-      setPartialCaption(null);
+      setTypingText(null);
     }
-  };
-
-  const switchSpeaker = () => {
-    setCurrentSpeaker(prev => prev === '1' ? '2' : '1');
   };
 
   const formatTime = (seconds) => {
@@ -149,7 +257,7 @@ function App() {
   const getTextForColumn = (conv, columnLang) => {
     return conv.originalLang === columnLang 
       ? conv.originalText 
-      : conv.translatedText;
+      : conv.translatedText || '(đang dịch...)';
   };
 
   return (
@@ -163,7 +271,7 @@ function App() {
                 Meeting Translator
               </h1>
               <p className="text-sm text-gray-500 mt-1">
-                Continuous Conversation Mode
+                Real-time Speech Recognition (Web Speech API)
               </p>
             </div>
             
@@ -177,9 +285,9 @@ function App() {
 
               {isSessionActive && (
                 <div className="flex items-center gap-2 bg-red-100 px-3 py-1 rounded-full">
-                  <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                  <Volume2 className="w-4 h-4 text-red-500 animate-pulse" />
                   <span className="text-sm font-mono text-red-700">
-                    REC {formatTime(sessionDuration)}
+                    LISTENING {formatTime(sessionDuration)}
                   </span>
                 </div>
               )}
@@ -211,7 +319,6 @@ function App() {
                   <option value="ja">🇯🇵 日本語</option>
                   <option value="en">🇺🇸 English</option>
                   <option value="ko">🇰🇷 한국어</option>
-                  <option value="zh">🇨🇳 中文</option>
                 </select>
               </div>
 
@@ -232,21 +339,20 @@ function App() {
                   <option value="vi">🇻🇳 Tiếng Việt</option>
                   <option value="en">🇺🇸 English</option>
                   <option value="ko">🇰🇷 한국어</option>
-                  <option value="zh">🇨🇳 中文</option>
                 </select>
               </div>
             </div>
 
-            <div className="bg-blue-50 border-l-4 border-blue-400 p-4 mb-4">
+            <div className="bg-green-50 border-l-4 border-green-400 p-4 mb-4">
               <div className="flex items-start gap-2">
-                <Info className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
-                <div className="text-sm text-blue-800">
-                  <p className="font-semibold mb-1">Chế độ Continuous:</p>
+                <Info className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                <div className="text-sm text-green-800">
+                  <p className="font-semibold mb-1">🎤 Web Speech API Mode:</p>
                   <ul className="list-disc list-inside space-y-1">
-                    <li>Nhấn "Start" <strong>một lần duy nhất</strong></li>
-                    <li>Hệ thống sẽ <strong>luôn lắng nghe</strong> và tự động dịch</li>
-                    <li>Không cần bấm nút mỗi khi nói</li>
-                    <li>Kết quả hiển thị realtime song song 2 ngôn ngữ</li>
+                    <li><strong>Real-time streaming</strong> - Thấy từng từ đang nói</li>
+                    <li><strong>Tự động dịch</strong> khi câu hoàn thành (im lặng 2s)</li>
+                    <li><strong>Miễn phí</strong> - Không tốn API OpenAI cho transcription</li>
+                    <li>Yêu cầu: Chrome/Edge, cho phép microphone</li>
                   </ul>
                 </div>
               </div>
@@ -279,22 +385,24 @@ function App() {
                   <div className="flex gap-2 mt-1">
                     <button
                       onClick={switchSpeaker}
-                      className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                      className={`px-3 py-1 rounded-full text-sm font-medium transition-colors flex items-center gap-1 ${
                         currentSpeaker === '1'
-                          ? 'bg-blue-500 text-white'
+                          ? 'bg-blue-500 text-white shadow-lg'
                           : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                       }`}
                     >
+                      {currentSpeaker === '1' && <Volume2 className="w-3 h-3 animate-pulse" />}
                       {getLanguageName(language1)}
                     </button>
                     <button
                       onClick={switchSpeaker}
-                      className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                      className={`px-3 py-1 rounded-full text-sm font-medium transition-colors flex items-center gap-1 ${
                         currentSpeaker === '2'
-                          ? 'bg-indigo-500 text-white'
+                          ? 'bg-indigo-500 text-white shadow-lg'
                           : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                       }`}
                     >
+                      {currentSpeaker === '2' && <Volume2 className="w-3 h-3 animate-pulse" />}
                       {getLanguageName(language2)}
                     </button>
                   </div>
@@ -329,21 +437,21 @@ function App() {
           </div>
         )}
 
-        {/* Partial Caption */}
-        {partialCaption && (
-          <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6 rounded-r-lg animate-pulse">
+        {/* Typing Indicator */}
+        {typingText && (
+          <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-300 p-4 mb-6 rounded-lg">
             <div className="flex items-center gap-2 mb-2">
-              <div className="w-2 h-2 bg-yellow-500 rounded-full animate-ping" />
-              <span className="text-xs font-semibold text-yellow-700 uppercase">
-                Đang xử lý...
+              <Volume2 className="w-4 h-4 text-blue-600 animate-bounce" />
+              <span className="text-xs font-semibold text-blue-700 uppercase">
+                Đang nhận dạng... {getLanguageName(typingText.language)}
+              </span>
+              <span className="text-xs text-gray-500">
+                (Speaker {currentSpeaker === '1' ? 'A' : 'B'})
               </span>
             </div>
-            <p className="text-lg text-gray-800 font-medium">
-              {partialCaption.text}
+            <p className="text-xl text-gray-800 font-medium">
+              {typingText.text}<span className="animate-pulse">|</span>
             </p>
-            <span className="text-xs text-yellow-600 mt-1 inline-block">
-              {getLanguageName(partialCaption.language)}
-            </span>
           </div>
         )}
 
@@ -364,6 +472,7 @@ function App() {
               {conversations.map((conv, index) => {
                 const text = getTextForColumn(conv, language1);
                 const isOriginal = conv.originalLang === language1;
+                const isTranslating = conv.isTranslating && !isOriginal;
                 
                 return (
                   <div 
@@ -371,6 +480,8 @@ function App() {
                     className={`p-3 rounded-lg transition-all ${
                       isOriginal 
                         ? 'bg-blue-100 border-l-4 border-blue-500' 
+                        : isTranslating
+                        ? 'bg-yellow-50 border-l-4 border-yellow-400 animate-pulse'
                         : 'bg-white border-l-4 border-gray-300'
                     }`}
                   >
@@ -379,9 +490,9 @@ function App() {
                         {new Date(conv.timestamp).toLocaleTimeString()}
                       </span>
                       <span className={`text-xs font-semibold ${
-                        isOriginal ? 'text-blue-600' : 'text-gray-500'
+                        isOriginal ? 'text-blue-600' : isTranslating ? 'text-yellow-600' : 'text-gray-500'
                       }`}>
-                        {isOriginal ? 'GỐC' : 'DỊCH'}
+                        {isOriginal ? 'GỐC' : isTranslating ? 'ĐANG DỊCH...' : 'DỊCH'}
                       </span>
                     </div>
                     <p className="text-base text-gray-800 leading-relaxed">
@@ -399,9 +510,9 @@ function App() {
                 </div>
               )}
 
-              {isSessionActive && conversations.length === 0 && (
+              {isSessionActive && conversations.length === 0 && !typingText && (
                 <div className="text-center text-blue-500 mt-32">
-                  <div className="w-16 h-16 mx-auto mb-3 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                  <Volume2 className="w-16 h-16 mx-auto mb-3 animate-pulse" />
                   <p className="text-sm font-medium">Đang lắng nghe...</p>
                   <p className="text-xs mt-1">Hãy bắt đầu nói</p>
                 </div>
@@ -421,6 +532,7 @@ function App() {
               {conversations.map((conv, index) => {
                 const text = getTextForColumn(conv, language2);
                 const isOriginal = conv.originalLang === language2;
+                const isTranslating = conv.isTranslating && !isOriginal;
                 
                 return (
                   <div 
@@ -428,6 +540,8 @@ function App() {
                     className={`p-3 rounded-lg transition-all ${
                       isOriginal 
                         ? 'bg-indigo-100 border-l-4 border-indigo-500' 
+                        : isTranslating
+                        ? 'bg-yellow-50 border-l-4 border-yellow-400 animate-pulse'
                         : 'bg-white border-l-4 border-gray-300'
                     }`}
                   >
@@ -436,9 +550,9 @@ function App() {
                         {new Date(conv.timestamp).toLocaleTimeString()}
                       </span>
                       <span className={`text-xs font-semibold ${
-                        isOriginal ? 'text-indigo-600' : 'text-gray-500'
+                        isOriginal ? 'text-indigo-600' : isTranslating ? 'text-yellow-600' : 'text-gray-500'
                       }`}>
-                        {isOriginal ? 'GỐC' : 'DỊCH'}
+                        {isOriginal ? 'GỐC' : isTranslating ? 'ĐANG DỊCH...' : 'DỊCH'}
                       </span>
                     </div>
                     <p className="text-base text-gray-800 leading-relaxed">
@@ -456,9 +570,9 @@ function App() {
                 </div>
               )}
 
-              {isSessionActive && conversations.length === 0 && (
+              {isSessionActive && conversations.length === 0 && !typingText && (
                 <div className="text-center text-indigo-500 mt-32">
-                  <div className="w-16 h-16 mx-auto mb-3 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                  <Volume2 className="w-16 h-16 mx-auto mb-3 animate-pulse" />
                   <p className="text-sm font-medium">Đang lắng nghe...</p>
                   <p className="text-xs mt-1">Hãy bắt đầu nói</p>
                 </div>
@@ -473,17 +587,15 @@ function App() {
             <div className="flex justify-center gap-8 text-sm text-gray-600">
               <div>
                 <span className="font-semibold">Tổng số câu:</span>{' '}
-                <span className="text-blue-600">{conversations.length}</span>
+                <span className="text-blue-600">{conversations.filter(c => !c.isTranslating).length}</span>
               </div>
               <div>
                 <span className="font-semibold">Thời lượng:</span>{' '}
                 <span className="text-blue-600">{formatTime(sessionDuration)}</span>
               </div>
               <div>
-                <span className="font-semibold">Session:</span>{' '}
-                <span className="text-gray-500 font-mono text-xs">
-                  {websocketService.getSessionId()?.substring(0, 16)}...
-                </span>
+                <span className="font-semibold">Công nghệ:</span>{' '}
+                <span className="text-green-600 font-mono text-xs">Web Speech API</span>
               </div>
             </div>
           </div>
@@ -493,7 +605,7 @@ function App() {
       <footer className="bg-white border-t border-gray-200 mt-8">
         <div className="max-w-7xl mx-auto px-4 py-4">
           <p className="text-center text-sm text-gray-500">
-            Meeting Translator - Continuous Mode | Powered by OpenAI
+            Meeting Translator - Real-time Mode | Web Speech API + OpenAI Translation
           </p>
         </div>
       </footer>

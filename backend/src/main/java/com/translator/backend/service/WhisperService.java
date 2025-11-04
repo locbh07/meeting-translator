@@ -36,82 +36,122 @@ public class WhisperService {
         this.objectMapper = new ObjectMapper();
     }
 
-    public String transcribe(String base64Audio, String language) {
-        int maxRetries = 3;
-        int retryCount = 0;
-        
-        while (retryCount < maxRetries) {
-            try {
-                byte[] audioBytes = Base64.decodeBase64(base64Audio);
-                
-                if (audioBytes.length < 1000) {
-                    log.warn("Audio too short, skipping");
-                    return "";
+    /**
+     * Transcribe với auto-detection - KHÔNG chỉ định language trước
+     */
+    public TranscriptionResult transcribeWithDetection(String base64Audio) {
+        try {
+            byte[] audioBytes = Base64.decodeBase64(base64Audio);
+            
+            if (audioBytes.length < 1000) {
+                log.warn("Audio too short, skipping");
+                return null;
+            }
+            
+            log.info("Transcribing audio: {} bytes (auto-detect language)", audioBytes.length);
+
+            // KHÔNG chỉ định language - để Whisper tự detect
+            RequestBody requestBody = new MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart("file", "audio.wav",
+                            RequestBody.create(audioBytes, MediaType.parse("audio/wav")))
+                    .addFormDataPart("model", model)
+                    .addFormDataPart("response_format", "verbose_json") // Lấy language detected
+                    .addFormDataPart("temperature", "0")
+                    .build();
+
+            Request request = new Request.Builder()
+                    .url("https://api.openai.com/v1/audio/transcriptions")
+                    .header("Authorization", "Bearer " + apiKey)
+                    .post(requestBody)
+                    .build();
+
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (response.isSuccessful()) {
+                    String responseBody = response.body().string();
+                    JsonNode jsonNode = objectMapper.readTree(responseBody);
+                    
+                    String text = jsonNode.get("text").asText().trim();
+                    String detectedLang = jsonNode.has("language") 
+                        ? jsonNode.get("language").asText() 
+                        : "unknown";
+                    
+                    log.info("✅ Transcribed [{}]: {}", detectedLang, text);
+                    
+                    return new TranscriptionResult(text, detectedLang);
+                    
+                } else {
+                    String errorBody = response.body() != null ? response.body().string() : "No error body";
+                    log.error("Whisper API error: {} - {}", response.code(), errorBody);
+                    return null;
                 }
-                
-                log.info("Transcribing audio (attempt {}): {} bytes, language: {}", 
-                         retryCount + 1, audioBytes.length, language);
+            }
 
-                RequestBody requestBody = new MultipartBody.Builder()
-                        .setType(MultipartBody.FORM)
-                        .addFormDataPart("file", "audio.wav",
-                                RequestBody.create(audioBytes, MediaType.parse("audio/wav")))
-                        .addFormDataPart("model", model)
-                        .addFormDataPart("language", language)
-                        .addFormDataPart("response_format", "json")
-                        .addFormDataPart("temperature", "0")
-                        .build();
+        } catch (Exception e) {
+            log.error("Error transcribing audio", e);
+            return null;
+        }
+    }
 
-                Request request = new Request.Builder()
-                        .url("https://api.openai.com/v1/audio/transcriptions")
-                        .header("Authorization", "Bearer " + apiKey)
-                        .post(requestBody)
-                        .build();
-
-                try (Response response = httpClient.newCall(request).execute()) {
-                    if (response.isSuccessful()) {
-                        String responseBody = response.body().string();
-                        JsonNode jsonNode = objectMapper.readTree(responseBody);
-                        String text = jsonNode.get("text").asText().trim();
-                        
-                        log.info("✅ Transcription: {}", text);
-                        return text;
-                        
-                    } else {
-                        String errorBody = response.body() != null ? response.body().string() : "No error body";
-                        log.error("Whisper API error (attempt {}): {} - {}", 
-                                 retryCount + 1, response.code(), errorBody);
-                        
-                        if (response.code() == 429 || response.code() >= 500) {
-                            retryCount++;
-                            if (retryCount < maxRetries) {
-                                Thread.sleep(1000 * retryCount);
-                                continue;
-                            }
-                        }
-                        throw new IOException("Whisper API error: " + response.code());
-                    }
-                }
-
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                log.error("Transcription interrupted", e);
+    /**
+     * Transcribe với language hint (fallback nếu cần)
+     */
+    public String transcribe(String base64Audio, String languageHint) {
+        try {
+            byte[] audioBytes = Base64.decodeBase64(base64Audio);
+            
+            if (audioBytes.length < 1000) {
+                log.warn("Audio too short, skipping");
                 return "";
-            } catch (Exception e) {
-                log.error("Error transcribing audio (attempt {})", retryCount + 1, e);
-                retryCount++;
-                if (retryCount >= maxRetries) {
-                    return "";
-                }
-                try {
-                    Thread.sleep(1000 * retryCount);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
+            }
+            
+            log.info("Transcribing audio: {} bytes, language hint: {}", audioBytes.length, languageHint);
+
+            RequestBody requestBody = new MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart("file", "audio.wav",
+                            RequestBody.create(audioBytes, MediaType.parse("audio/wav")))
+                    .addFormDataPart("model", model)
+                    .addFormDataPart("language", languageHint)
+                    .addFormDataPart("response_format", "json")
+                    .addFormDataPart("temperature", "0")
+                    .build();
+
+            Request request = new Request.Builder()
+                    .url("https://api.openai.com/v1/audio/transcriptions")
+                    .header("Authorization", "Bearer " + apiKey)
+                    .post(requestBody)
+                    .build();
+
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (response.isSuccessful()) {
+                    String responseBody = response.body().string();
+                    JsonNode jsonNode = objectMapper.readTree(responseBody);
+                    String text = jsonNode.get("text").asText().trim();
+                    
+                    log.info("✅ Transcription: {}", text);
+                    return text;
+                    
+                } else {
+                    String errorBody = response.body() != null ? response.body().string() : "No error body";
+                    log.error("Whisper API error: {} - {}", response.code(), errorBody);
                     return "";
                 }
             }
+
+        } catch (Exception e) {
+            log.error("Error transcribing audio", e);
+            return "";
         }
-        
-        return "";
+    }
+
+    public static class TranscriptionResult {
+        public final String text;
+        public final String detectedLanguage;
+
+        public TranscriptionResult(String text, String detectedLanguage) {
+            this.text = text;
+            this.detectedLanguage = detectedLanguage;
+        }
     }
 }

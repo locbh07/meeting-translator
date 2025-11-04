@@ -33,31 +33,45 @@ public class TranslationService {
     }
 
     /**
-     * Translate text using GPT
+     * ✅ Translate với prompt cải tiến để tránh hallucination
      */
     public String translate(String text, String sourceLang, String targetLang) {
         try {
             log.info("Translating: {} -> {}: {}", sourceLang, targetLang, text);
 
-            // Language names for prompt
             String sourceLanguageName = getLanguageName(sourceLang);
             String targetLanguageName = getLanguageName(targetLang);
 
-            // Create prompt
+            // ✅ IMPROVED PROMPT - Rõ ràng, không thêm thắt
             String prompt = String.format(
-            	"Vietnamese and Japanese conversation. No video content." +
-                "Translate the following %s text to %s. " +
-                "Provide only the translation, no explanations:\n\n%s",
+                "You are a professional translator for live conversations.\n\n" +
+                "Task: Translate the following %s text to %s.\n\n" +
+                "Rules:\n" +
+                "- Translate ONLY what is given\n" +
+                "- Do NOT add explanations or extra content\n" +
+                "- Do NOT mention video, YouTube, or any context not in the text\n" +
+                "- Keep the translation natural and conversational\n" +
+                "- Output ONLY the translation\n\n" +
+                "Text to translate:\n%s",
                 sourceLanguageName, targetLanguageName, text
             );
-            
 
             // Build request JSON
             ObjectNode requestJson = objectMapper.createObjectNode();
             requestJson.put("model", model);
-            requestJson.put("temperature", 0.3);
+            requestJson.put("temperature", 0.2); // Giảm từ 0.3 -> 0.2 để ít creative hơn
             
             ArrayNode messages = requestJson.putArray("messages");
+            
+            // System message để enforce behavior
+            ObjectNode systemMessage = messages.addObject();
+            systemMessage.put("role", "system");
+            systemMessage.put("content", 
+                "You are a precise translator. " +
+                "Translate only what is given. " +
+                "Never add context or explanations.");
+            
+            // User message
             ObjectNode userMessage = messages.addObject();
             userMessage.put("role", "user");
             userMessage.put("content", prompt);
@@ -104,11 +118,11 @@ public class TranslationService {
 
     private String getLanguageName(String langCode) {
         return switch (langCode.toLowerCase()) {
-            case "ja" -> "Japanese";
-            case "vi" -> "Vietnamese";
-            case "en" -> "English";
-            case "ko" -> "Korean";
-            case "zh" -> "Chinese";
+            case "ja", "jpn" -> "Japanese";
+            case "vi", "vie" -> "Vietnamese";
+            case "en", "eng" -> "English";
+            case "ko", "kor" -> "Korean";
+            case "zh", "zho", "chi" -> "Chinese";
             default -> langCode;
         };
     }

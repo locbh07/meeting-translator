@@ -28,23 +28,23 @@ class AudioService {
         numberOfAudioChannels: 1,
         desiredSampRate: 16000,
         
-        // ✅ GIẢM XUỐNG 1.5 GIÂY để audio nhỏ hơn 50KB
-        timeSlice: 1500, // 1.5 seconds
+        // ✅ GIẢM XUỐNG 1 GIÂY để đảm bảo < 40KB
+        timeSlice: 1000, // 1 second chunks
         
         ondataavailable: async (blob) => {
           if (this.isRecording && blob.size > 0) {
             try {
               const sizeKB = Math.round(blob.size / 1024);
-              console.log('📦 Audio chunk:', blob.size, 'bytes (', sizeKB, 'KB)');
+              console.log('✅ Voice detected:', sizeKB, 'KB');
               
-              // Chỉ gửi nếu kích thước hợp lý
-              if (blob.size > 500 && blob.size < 60000) {
+              // ✅ Chỉ gửi nếu kích thước hợp lý (1KB - 45KB)
+              if (blob.size > 1000 && blob.size < 46000) {
                 const base64Audio = await this.blobToBase64(blob);
                 onAudioChunk(base64Audio);
-              } else if (blob.size >= 60000) {
+              } else if (blob.size >= 46000) {
                 console.warn('⚠️ Chunk quá lớn, bỏ qua:', sizeKB, 'KB');
               } else {
-                console.warn('⚠️ Chunk quá nhỏ, bỏ qua');
+                console.warn('⚠️ Chunk quá nhỏ (silence), bỏ qua');
               }
             } catch (error) {
               console.error('Error processing audio:', error);
@@ -56,7 +56,7 @@ class AudioService {
       this.recorder.startRecording();
       this.isRecording = true;
       
-      console.log('✅ Recording started (WAV, 16kHz mono, 1.5s chunks)');
+      console.log('✅ Recording started (WAV, 16kHz mono, 1s chunks)');
       return true;
 
     } catch (error) {
