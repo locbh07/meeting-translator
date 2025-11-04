@@ -1,0 +1,21 @@
+# --- Frontend ---
+frontend/node_modules
+frontend/dist
+frontend/.env
+frontend/.vite
+frontend/.next
+
+# --- Backend ---
+backend/target
+backend/.idea
+backend/.vscode
+backend/.classpath
+backend/.project
+backend/.settings
+backend/.env
+backend/application-local.yml
+
+# --- System files ---
+*.log
+.DS_Store
+Thumbs.db
